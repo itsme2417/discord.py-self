@@ -56,7 +56,7 @@ from typing import (
 )
 import collections
 import unicodedata
-from base64 import b64encode
+from base64 import b64encode, b64decode
 from bisect import bisect_left
 import datetime
 import functools
@@ -73,7 +73,6 @@ import sys
 from threading import Timer
 import types
 import warnings
-import logging
 
 import yarl
 
@@ -107,6 +106,7 @@ __all__ = (
 )
 
 DISCORD_EPOCH = 1420070400000
+DEFAULT_FILE_SIZE_LIMIT_BYTES = 26214400
 
 _log = logging.getLogger(__name__)
 
@@ -703,6 +703,9 @@ def _bytes_to_base64_data(data: bytes) -> str:
     mime = _get_mime_type_for_image(data, fallback=True)
     b64 = b64encode(data).decode('ascii')
     return fmt.format(mime=mime, data=b64)
+    
+def _base64_to_bytes(data: str) -> bytes:
+    return b64decode(data.encode('ascii'))
 
 
 def _is_submodule(parent: str, child: str) -> bool:
@@ -1017,8 +1020,7 @@ _MARKDOWN_ESCAPE_REGEX = re.compile(fr'(?P<markdown>{_MARKDOWN_ESCAPE_SUBREGEX}|
 
 _URL_REGEX = r'(?P<url><[^: >]+:\/[^ >]+>|(?:https?|steam):\/\/[^\s<]+[^<.,:;\"\'\]\s])'
 
-_MARKDOWN_STOCK_REGEX = fr'(?P<markdown>[_\\~|\*`]|{_MARKDOWN_ESCAPE_COMMON})'
-
+_MARKDOWN_STOCK_REGEX = fr'(?P<markdown>[_\\~|\*`#-]|{_MARKDOWN_ESCAPE_COMMON})'
 
 def remove_markdown(text: str, *, ignore_links: bool = True) -> str:
     """A helper function that removes markdown characters.
@@ -1516,11 +1518,11 @@ def is_docker() -> bool:
 
 
 def stream_supports_colour(stream: Any) -> bool:
+    is_a_tty = hasattr(stream, 'isatty') and stream.isatty()
     # Pycharm and Vscode support colour in their inbuilt editors
     if 'PYCHARM_HOSTED' in os.environ or os.environ.get('TERM_PROGRAM') == 'vscode':
-        return True
-
-    is_a_tty = hasattr(stream, 'isatty') and stream.isatty()
+        return is_a_tty
+        
     if sys.platform != 'win32':
         # Docker does not consistently have a tty attached to it
         return is_a_tty or is_docker()
@@ -1631,3 +1633,67 @@ def setup_logging(
     handler.setFormatter(formatter)
     logger.setLevel(level)
     logger.addHandler(handler)
+
+
+if TYPE_CHECKING:
+    
+    def murmurhash32(key: Union[bytes, bytearray, memoryview, str], seed: int = 0, *, signed: bool = True) -> int:  # type: ignore
+        pass
+
+else:
+    try:
+        from mmh3 import hash as murmurhash32  # Prefer the mmh3 package if available
+
+    except ImportError:
+        # Modified murmurhash3 function from https://github.com/wc-duck/pymmh3/blob/master/pymmh3.py
+        def murmurhash32(key: Union[bytes, bytearray, memoryview, str], seed: int = 0, *, signed: bool = True) -> int:
+            key = bytearray(key.encode() if isinstance(key, str) else key)
+            length = len(key)
+            nblocks = int(length / 4)
+
+            h1 = seed
+            c1 = 0xCC9E2D51
+            c2 = 0x1B873593
+
+            for block_start in range(0, nblocks * 4, 4):
+                k1 = (
+                    key[block_start + 3] << 24
+                    | key[block_start + 2] << 16
+                    | key[block_start + 1] << 8
+                    | key[block_start + 0]
+                )
+
+                k1 = (c1 * k1) & 0xFFFFFFFF
+                k1 = (k1 << 15 | k1 >> 17) & 0xFFFFFFFF
+                k1 = (c2 * k1) & 0xFFFFFFFF
+
+                h1 ^= k1
+                h1 = (h1 << 13 | h1 >> 19) & 0xFFFFFFFF
+                h1 = (h1 * 5 + 0xE6546B64) & 0xFFFFFFFF
+
+            tail_index = nblocks * 4
+            k1 = 0
+            tail_size = length & 3
+
+            if tail_size >= 3:
+                k1 ^= key[tail_index + 2] << 16
+            if tail_size >= 2:
+                k1 ^= key[tail_index + 1] << 8
+            if tail_size >= 1:
+                k1 ^= key[tail_index + 0]
+            if tail_size > 0:
+                k1 = (k1 * c1) & 0xFFFFFFFF
+                k1 = (k1 << 15 | k1 >> 17) & 0xFFFFFFFF
+                k1 = (k1 * c2) & 0xFFFFFFFF
+                h1 ^= k1
+
+            unsigned_val = h1 ^ length
+            unsigned_val ^= unsigned_val >> 16
+            unsigned_val = (unsigned_val * 0x85EBCA6B) & 0xFFFFFFFF
+            unsigned_val ^= unsigned_val >> 13
+            unsigned_val = (unsigned_val * 0xC2B2AE35) & 0xFFFFFFFF
+            unsigned_val ^= unsigned_val >> 16
+            if not signed or (unsigned_val & 0x80000000 == 0):
+                return unsigned_val
+            else:
+                return -((unsigned_val ^ 0xFFFFFFFF) + 1)
