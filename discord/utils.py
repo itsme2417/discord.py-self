@@ -56,7 +56,7 @@ from typing import (
 )
 import collections
 import unicodedata
-from base64 import b64encode, b64decode
+from base64 import b64encode
 from bisect import bisect_left
 import datetime
 import functools
@@ -73,6 +73,7 @@ import sys
 from threading import Timer
 import types
 import warnings
+import logging
 
 import yarl
 
@@ -106,7 +107,6 @@ __all__ = (
 )
 
 DISCORD_EPOCH = 1420070400000
-DEFAULT_FILE_SIZE_LIMIT_BYTES = 26214400
 
 _log = logging.getLogger(__name__)
 
@@ -705,10 +705,6 @@ def _bytes_to_base64_data(data: bytes) -> str:
     return fmt.format(mime=mime, data=b64)
 
 
-def _base64_to_bytes(data: str) -> bytes:
-    return b64decode(data.encode('ascii'))
-
-
 def _is_submodule(parent: str, child: str) -> bool:
     return parent == child or child.startswith(parent + '.')
 
@@ -940,7 +936,7 @@ def resolve_invite(invite: Union[Invite, str]) -> ResolvedInvite:
     :class:`.ResolvedInvite`
         A data class containing the invite code and the event ID.
     """
-    from .invite import Invite  # Circular import
+    from .invite import Invite  # circular import
 
     if isinstance(invite, Invite):
         return ResolvedInvite(invite.code, invite.scheduled_event_id)
@@ -973,7 +969,7 @@ def resolve_template(code: Union[Template, str]) -> str:
     :class:`str`
         The template code.
     """
-    from .template import Template  # Circular import
+    from .template import Template  # circular import
 
     if isinstance(code, Template):
         return code.code
@@ -1001,7 +997,7 @@ def resolve_gift(code: Union[Gift, str]) -> str:
     :class:`str`
         The gift code.
     """
-    from .entitlements import Gift  # Circular import
+    from .entitlements import Gift  # circular import
 
     if isinstance(code, Gift):
         return code.code
@@ -1021,7 +1017,7 @@ _MARKDOWN_ESCAPE_REGEX = re.compile(fr'(?P<markdown>{_MARKDOWN_ESCAPE_SUBREGEX}|
 
 _URL_REGEX = r'(?P<url><[^: >]+:\/[^ >]+>|(?:https?|steam):\/\/[^\s<]+[^<.,:;\"\'\]\s])'
 
-_MARKDOWN_STOCK_REGEX = fr'(?P<markdown>[_\\~|\*`#-]|{_MARKDOWN_ESCAPE_COMMON})'
+_MARKDOWN_STOCK_REGEX = fr'(?P<markdown>[_\\~|\*`]|{_MARKDOWN_ESCAPE_COMMON})'
 
 
 def remove_markdown(text: str, *, ignore_links: bool = True) -> str:
@@ -1470,21 +1466,31 @@ async def _get_info(session: ClientSession) -> Tuple[Dict[str, Any], str]:
     return properties, b64encode(_to_json(properties).encode()).decode('utf-8')
 
 
-async def _get_build_number(session: ClientSession) -> int:  # Thank you Discord-S.C.U.M
+async def _get_build_number(session: ClientSession) -> int:
     """Fetches client build number"""
-    default_build_number = 9999
     try:
         login_page_request = await session.get('https://discord.com/login', timeout=7)
         login_page = await login_page_request.text()
-        build_url = 'https://discord.com/assets/' + re.compile(r'assets/+([a-z.0-9]+)\.js').findall(login_page)[-2] + '.js'
-        build_request = await session.get(build_url, timeout=7)
-        build_file = await build_request.text()
-        build_find = re.findall(r'Build Number:\D+"(\d+)"', build_file)
-        return int(build_find[0]) if build_find else default_build_number
-    except asyncio.TimeoutError:
+        # Find all potential JavaScript files that could contain the build number
+        js_files = re.findall(r'assets/([a-z0-9]+)\.js', login_page)
+        # Check each JavaScript file for the build number
+        for js_file in js_files:
+            build_url = f'https://discord.com/assets/{js_file}.js'
+            build_request = await session.get(build_url, timeout=7)
+            build_file = await build_request.text()
+            # Look for 'buildNumber' in the JS file
+            build_index = build_file.find('buildNumber') + len('buildNumber') + 2  # Adjusting the offset to after "buildNumber": 
+            # Try to extract a six-digit number, assuming that the build number is 6 digits
+            possible_build_number = build_file[build_index: build_index + 6]
+            # If we find a number, return it
+            if possible_build_number.isdigit():
+                return int(possible_build_number)
+        # If no build number is found in any file, fall back to the hardcoded value
         _log.critical('Could not fetch client build number. Falling back to hardcoded value...')
-        return default_build_number
-
+        return 244594
+    except asyncio.TimeoutError as e:
+        _log.critical(f'Could not fetch client build number due to timeout: {e}')
+        return 244594
 
 async def _get_user_agent(session: ClientSession) -> str:
     """Fetches the latest Windows 10/Chrome user-agent."""
@@ -1510,12 +1516,11 @@ def is_docker() -> bool:
 
 
 def stream_supports_colour(stream: Any) -> bool:
-    is_a_tty = hasattr(stream, 'isatty') and stream.isatty()
-
     # Pycharm and Vscode support colour in their inbuilt editors
     if 'PYCHARM_HOSTED' in os.environ or os.environ.get('TERM_PROGRAM') == 'vscode':
-        return is_a_tty
+        return True
 
+    is_a_tty = hasattr(stream, 'isatty') and stream.isatty()
     if sys.platform != 'win32':
         # Docker does not consistently have a tty attached to it
         return is_a_tty or is_docker()
@@ -1526,6 +1531,7 @@ def stream_supports_colour(stream: Any) -> bool:
 
 
 class _ColourFormatter(logging.Formatter):
+
     # ANSI codes are a bit weird to decipher if you're unfamiliar with them, so here's a refresher
     # It starts off with a format like \x1b[XXXm where XXX is a semicolon separated list of commands
     # The important ones here relate to colour.
@@ -1625,67 +1631,3 @@ def setup_logging(
     handler.setFormatter(formatter)
     logger.setLevel(level)
     logger.addHandler(handler)
-
-
-if TYPE_CHECKING:
-
-    def murmurhash32(key: Union[bytes, bytearray, memoryview, str], seed: int = 0, *, signed: bool = True) -> int:  # type: ignore
-        pass
-
-else:
-    try:
-        from mmh3 import hash as murmurhash32  # Prefer the mmh3 package if available
-
-    except ImportError:
-        # Modified murmurhash3 function from https://github.com/wc-duck/pymmh3/blob/master/pymmh3.py
-        def murmurhash32(key: Union[bytes, bytearray, memoryview, str], seed: int = 0, *, signed: bool = True) -> int:
-            key = bytearray(key.encode() if isinstance(key, str) else key)
-            length = len(key)
-            nblocks = int(length / 4)
-
-            h1 = seed
-            c1 = 0xCC9E2D51
-            c2 = 0x1B873593
-
-            for block_start in range(0, nblocks * 4, 4):
-                k1 = (
-                    key[block_start + 3] << 24
-                    | key[block_start + 2] << 16
-                    | key[block_start + 1] << 8
-                    | key[block_start + 0]
-                )
-
-                k1 = (c1 * k1) & 0xFFFFFFFF
-                k1 = (k1 << 15 | k1 >> 17) & 0xFFFFFFFF
-                k1 = (c2 * k1) & 0xFFFFFFFF
-
-                h1 ^= k1
-                h1 = (h1 << 13 | h1 >> 19) & 0xFFFFFFFF
-                h1 = (h1 * 5 + 0xE6546B64) & 0xFFFFFFFF
-
-            tail_index = nblocks * 4
-            k1 = 0
-            tail_size = length & 3
-
-            if tail_size >= 3:
-                k1 ^= key[tail_index + 2] << 16
-            if tail_size >= 2:
-                k1 ^= key[tail_index + 1] << 8
-            if tail_size >= 1:
-                k1 ^= key[tail_index + 0]
-            if tail_size > 0:
-                k1 = (k1 * c1) & 0xFFFFFFFF
-                k1 = (k1 << 15 | k1 >> 17) & 0xFFFFFFFF
-                k1 = (k1 * c2) & 0xFFFFFFFF
-                h1 ^= k1
-
-            unsigned_val = h1 ^ length
-            unsigned_val ^= unsigned_val >> 16
-            unsigned_val = (unsigned_val * 0x85EBCA6B) & 0xFFFFFFFF
-            unsigned_val ^= unsigned_val >> 13
-            unsigned_val = (unsigned_val * 0xC2B2AE35) & 0xFFFFFFFF
-            unsigned_val ^= unsigned_val >> 16
-            if not signed or (unsigned_val & 0x80000000 == 0):
-                return unsigned_val
-            else:
-                return -((unsigned_val ^ 0xFFFFFFFF) + 1)
